@@ -3,7 +3,6 @@
 [![Proxmox](https://img.shields.io/badge/Platform-Proxmox-blue)](https://www.proxmox.com)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Shell Script](https://img.shields.io/badge/Shell-Bash-lightgrey?logo=gnu-bash)](https://www.gnu.org/software/bash/)
-[![GitHub Workflow Status](https://img.shields.io/github/workflow/status/Kryxan/automount-pve/CI?label=CI)](https://github.com/Kryxan/automount-pve/actions)
 
 Automount every partition (ext4 / NTFS / exFAT / FAT / XFS / btrfs) found on
 dynamically-attached USB storage to `/mnt/<label>`. NFS & SMB sharing configured
