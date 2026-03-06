@@ -56,7 +56,7 @@ The installer will:
 In Proxmox 9 I experienced an issue where USB volumes mounted under `/mnt` on
 the host appear as **empty folders** inside LXC containers that bind-mount `/mnt`.
 
-### The shared case scenareo
+### The shared case scenario
 
 The problem is **mount propagation**. When an LXC container starts, it gets a
 snapshot of the current mount tree. USB drives mounted *after* the container
@@ -74,7 +74,7 @@ I saw no issue with this simple step, I've included the fix to ensure
 
 ### The recursive bind mount exception
 
-USB drives mounted *before* the container can also experience a seperate but similar
+USB drives mounted *before* the container can also experience a separate but similar
 issue. This was my issue after upgrading to Proxmox 9. I don't think I had this 
 manifest as an issue in Proxmox 8.
 
@@ -112,4 +112,21 @@ with shared propagation, USB sub-mounts appear automatically.
   it's the best solution, but we're all still waiting for `ntfs-LTE`)
 - **Mount labels:** The mount directory uses the partition label. If none exists, the
   device name (e.g. `sdc2`) is used. Duplicate labels get a device suffix.
+
+
+### Compatibility audit 
+provided by Github AI 
+
+| File | Item | PVE8 / Deb12 | PVE9 / Deb13 | Ubuntu 22/24 |
+|---|---|---|---|---|
+| mount_usb_memory.sh | `findmnt` (util-linux) | ✓ | ✓ | ✓ |
+| mount_usb_memory.sh | `/usr/sbin/blkid` | ✓ (`/usr/sbin`→`/usr/bin` symlink on Deb12+) | ✓ | ✓ |
+| mount_usb_memory.sh | `ntfs3` kernel driver | ✓ kernel 6.x | ✓ | ✓ kernel ≥5.15 |
+| installAutoMount.sh | `dpkg -s` check | ✓ Debian-only, intended | ✓ | ✓ |
+| installAutoMount.sh | `mountpoint -q` (util-linux) | ✓ | ✓ | ✓ |
+| configure_shares.sh | `ksmbd-tools` package | ✓ Deb12 | ✓ Deb13 | ✓ |
+| configure_shares.sh | `exfatprogs` package | ✓ Deb12 | ✓ Deb13 | ✓ |
+| mnt-shared-propagation.service | `Before=lxc.service pve-guests.service` | ✓ PVE-only units; missing units are silently ignored by systemd | ✓ | ✓ (units absent, ignored) |
+| 99-auto-mount-sdxy.rules | `sd[a-z][0-9]` | Only matches partitions 1–9 and devices `sda`–`sdz`; `sda10+` or `sdaa+` unmatched — acceptable for USB drives in practice | ✓ | ✓ |
+| All scripts | `#!/bin/bash` + `[[ ]]`, `${BASH_SOURCE[0]}`, etc. | ✓ bash ≥4.2 | ✓ | ✓ |
 

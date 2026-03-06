@@ -95,14 +95,18 @@ install_file() {
 log "Installing automount files into ${OPT_DIR} …"
 
 # Copy README.md into OPT_DIR (skip if already running from there)
-if [[ "README.md" != "${OPT_DIR}/README.md" ]]; then
+if [[ "${SCRIPT_DIR}/README.md" != "${OPT_DIR}/README.md" ]]; then
     log "Copying README.md → ${OPT_DIR}/README.md"
-    cp -f -- "README.md" "${OPT_DIR}/README.md"
+    cp -f -- "${SCRIPT_DIR}/README.md" "${OPT_DIR}/README.md"
+    chown root:root "${OPT_DIR}/README.md"
+    chmod 0644 "${OPT_DIR}/README.md"
 fi
 # Copy installAutoMount.sh into OPT_DIR (skip if already running from there)
-if [[ "installAutoMount.sh" != "${OPT_DIR}/installAutoMount.sh" ]]; then
+if [[ "${SCRIPT_DIR}/installAutoMount.sh" != "${OPT_DIR}/installAutoMount.sh" ]]; then
     log "Copying installAutoMount.sh → ${OPT_DIR}/installAutoMount.sh"
-    cp -f -- "installAutoMount.sh" "${OPT_DIR}/installAutoMount.sh"
+    cp -f -- "${SCRIPT_DIR}/installAutoMount.sh" "${OPT_DIR}/installAutoMount.sh"
+    chown root:root "${OPT_DIR}/installAutoMount.sh"
+    chmod 0755 "${OPT_DIR}/installAutoMount.sh"
 fi
 
 install_file mount_usb_memory.sh      /etc/mount_usb_memory.sh                 0755
@@ -120,7 +124,10 @@ if ! systemctl is-enabled --quiet mnt-shared-propagation 2>/dev/null; then
     systemctl enable mnt-shared-propagation
     log "Enabled mnt-shared-propagation.service"
 fi
-# Apply immediately (in case containers are already running)
+# Apply immediately (in case containers are already running).
+# mount --make-rshared requires a mount point; on a stock Debian
+# /mnt is a plain directory, so ensure it is bind-mounted first.
+mountpoint -q /mnt || mount --bind /mnt /mnt 2>/dev/null || true
 mount --make-rshared /mnt 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
@@ -145,7 +152,7 @@ check_package() {
 }
 
 check_package ntfs-3g    "required for reliable NTFS read/write support"
-check_package exfatprogs  "required for exFAT filesystem check support"
+check_package exfatprogs  "provides fsck.exfat and mkfs.exfat for exFAT filesystem support"
 
 # ---------------------------------------------------------------------------
 # ZFS unit overrides — strip deprecated Requires=systemd-udev-settle

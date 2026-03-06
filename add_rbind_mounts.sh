@@ -37,8 +37,10 @@ add_rbind() {
     cp "${cfg}" "${tmp}"
 
     if [[ "${replace_mp}" == "yes" ]]; then
-        # Remove mpX entries that mount /mnt
-        sed -i -E '/^mp[0-9]+:\s*\/mnt(,|$)/d' "${tmp}"
+        # Remove mpX entries that mount /mnt.
+        # [[:space:]]* is POSIX ERE; \s is a GNU extension and not portable.
+        # /? handles optional trailing slash on the host path (mp0: /mnt/,mp=…)
+        sed -i -E '/^mp[0-9]+:[[:space:]]*\/mnt\/?(,|$)/d' "${tmp}"
     fi
 
     # If line already present, nothing to do
@@ -58,7 +60,9 @@ for cfg in "${configs[@]}"; do
     has_mp_mnt=false
 
     grep -Fxq "${RbindLine}" "${cfg}" && has_rbind=true
-    grep -Eq '^mp[0-9]+:\s*/mnt(,|$)' "${cfg}" && has_mp_mnt=true
+    # [[:space:]]* is POSIX ERE; \s is not portable across grep -E implementations.
+    # /? handles optional trailing slash (mp0: /mnt/,mp=…)
+    grep -Eq '^mp[0-9]+:[[:space:]]*/mnt/?(,|$)' "${cfg}" && has_mp_mnt=true
 
     if ${has_rbind}; then
         log "CT ${ctid}: already has recursive /mnt bind — skipping"

@@ -109,7 +109,7 @@ fi
 log "Sharing ${MOUNT_PARENT} — SMB=${ENABLE_SMB} NFS=${ENABLE_NFS} subnet=${SUBNET}"
 
 # ---------------------------------------------------------------------------
-# SMB — prefer ksmbd, fall back to Samba
+# SMB
 # ---------------------------------------------------------------------------
 if [[ "${ENABLE_SMB}" == "yes" ]]; then
     # Detect which SMB server is available (prefer Samba over ksmbd)
@@ -142,8 +142,6 @@ if [[ "${ENABLE_SMB}" == "yes" ]]; then
         HOSTS_ALLOW="${SUBNET%.*}. 127."
         cat > "${KSMBD_CONF}" <<EOF
 [global]
-   follow symlinks = yes
-   wide links = yes
    netbios name = files
    server string = Proxmox USB Automount Share
    workgroup = WORKGROUP
@@ -160,8 +158,6 @@ if [[ "${ENABLE_SMB}" == "yes" ]]; then
    force group = root
    create mask = 0664
    directory mask = 0775
-   follow symlinks = yes
-   wide links = yes
 EOF
         # Restart ksmbd
         if systemctl is-active --quiet ksmbd 2>/dev/null; then
@@ -189,8 +185,6 @@ EOF
    force group = root
    create mask = 0664
    directory mask = 0775
-   follow symlinks = yes
-   wide links = yes
    hosts allow = ${SUBNET} 127.0.0.0/8
 EOF
         systemctl enable --now smbd 2>/dev/null || warn "Could not start smbd"
@@ -218,9 +212,11 @@ if [[ "${ENABLE_NFS}" == "yes" ]]; then
         mkdir -p "$(dirname "${NFS_EXPORTS}")"
 
         # crossmnt causes the server to automatically export sub-mounts (USB drives)
+        # root_squash maps remote root to the anonymous uid/gid, preventing
+        # NFS clients from gaining host-root access to the exported tree.
         cat > "${NFS_EXPORTS}" <<EOF
 # automount-pve: export /mnt with crossmnt so USB sub-mounts are visible
-${MOUNT_PARENT}  ${SUBNET}(rw,sync,no_subtree_check,no_root_squash,crossmnt,fsid=0)
+${MOUNT_PARENT}  ${SUBNET}(rw,sync,no_subtree_check,root_squash,crossmnt,fsid=0)
 EOF
         exportfs -ra 2>/dev/null || true
         systemctl enable --now nfs-kernel-server 2>/dev/null || warn "Could not start nfs-kernel-server"

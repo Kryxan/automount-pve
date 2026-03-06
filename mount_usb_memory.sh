@@ -25,26 +25,32 @@ LOGGER_CMD="/usr/bin/logger"
 RMDIR_CMD="/usr/bin/rmdir"
 BLKID_CMD="/usr/sbin/blkid"
 
-# Optional: regenerate share config after mount/unmount
-SHARE_REGEN="/opt/automount-pve/configure_shares.sh"
-
 # See if this drive is already mounted
-MOUNT_POINT=$(findmnt -n -o TARGET -S "${DEVICE}" 2>/dev/null || true)
+MOUNT_POINT=$(/usr/bin/findmnt -n -o TARGET -S "${DEVICE}" 2>/dev/null || true)
 
 # ---------------------------------------------------------------------------
 # Filesystem check — runs a non-interactive repair before mounting.
 # For NTFS volumes this is especially important to clear the "dirty" flag
 # that Windows tends to leave behind (hibernate / improper eject).
+#
+# Returns 0 if it is safe to proceed with mounting, non-zero if uncorrectable
+# errors were found and the mount should be aborted.
 # ---------------------------------------------------------------------------
 do_fsck() {
     local dev="$1" fstype="$2"
+    local fsck_rc=0
     case "${fstype}" in
         ntfs|ntfs3)
             if command -v ntfsfix >/dev/null 2>&1; then
-                ${LOGGER_CMD} "${ScriptName}: Running ntfsfix on ${dev}"
+                ${LOGGER_CMD} "${ScriptName}: Running ntfsfix -d on ${dev}"
                 ntfsfix -d "${dev}" 2>&1 | while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: ntfsfix: ${line}"
                 done
+                fsck_rc=${PIPESTATUS[0]}
+                if [[ ${fsck_rc} -ne 0 ]]; then
+                    # Non-fatal: ntfs-3g can mount dirty volumes without ntfsfix succeeding
+                    ${LOGGER_CMD} "${ScriptName}: WARNING — ntfsfix exited ${fsck_rc} on ${dev}; proceeding (ntfs-3g handles dirty volumes)"
+                fi
             else
                 ${LOGGER_CMD} "${ScriptName}: WARNING — ntfsfix not found; skipping NTFS check on ${dev}"
             fi
@@ -55,6 +61,30 @@ do_fsck() {
                 fsck.vfat -a "${dev}" 2>&1 | while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: fsck.vfat: ${line}"
                 done
+                fsck_rc=${PIPESTATUS[0]}
+                # fsck.vfat: 0=clean/repaired, 1=fixable errors corrected, 2+=fatal
+                if [[ ${fsck_rc} -ge 2 ]]; then
+                    ${LOGGER_CMD} "${ScriptName}: ERROR — fsck.vfat exited ${fsck_rc} on ${dev}; aborting mount"
+                    return "${fsck_rc}"
+                elif [[ ${fsck_rc} -eq 1 ]]; then
+                    ${LOGGER_CMD} "${ScriptName}: INFO — fsck.vfat corrected errors on ${dev}"
+                fi
+            fi
+            ;;
+        exfat)
+            if command -v fsck.exfat >/dev/null 2>&1; then
+                ${LOGGER_CMD} "${ScriptName}: Running fsck.exfat -y on ${dev}"
+                fsck.exfat -y "${dev}" 2>&1 | while IFS= read -r line; do
+                    ${LOGGER_CMD} "${ScriptName}: fsck.exfat: ${line}"
+                done
+                fsck_rc=${PIPESTATUS[0]}
+                # fsck.exfat: 0=clean, 1=errors corrected, 2+=uncorrectable
+                if [[ ${fsck_rc} -ge 2 ]]; then
+                    ${LOGGER_CMD} "${ScriptName}: ERROR — fsck.exfat exited ${fsck_rc} on ${dev}; aborting mount"
+                    return "${fsck_rc}"
+                elif [[ ${fsck_rc} -eq 1 ]]; then
+                    ${LOGGER_CMD} "${ScriptName}: INFO — fsck.exfat corrected errors on ${dev}"
+                fi
             fi
             ;;
         ext2|ext3|ext4)
@@ -63,14 +93,36 @@ do_fsck() {
                 e2fsck -p "${dev}" 2>&1 | while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: e2fsck: ${line}"
                 done
+                fsck_rc=${PIPESTATUS[0]}
+                # e2fsck exit codes are bitmasks:
+                #   bit 0 (1) = errors corrected
+                #   bit 1 (2) = errors corrected, reboot recommended (root fs; not relevant for USB)
+                #   bit 2 (4) = errors left uncorrected  → fatal
+                #   >=8       = operational/usage/library error → fatal
+                if (( (fsck_rc & 4) || fsck_rc >= 8 )); then
+                    ${LOGGER_CMD} "${ScriptName}: ERROR — e2fsck exited ${fsck_rc} on ${dev}; aborting mount"
+                    return "${fsck_rc}"
+                elif [[ ${fsck_rc} -ne 0 ]]; then
+                    ${LOGGER_CMD} "${ScriptName}: INFO — e2fsck corrected errors on ${dev} (rc=${fsck_rc})"
+                fi
             fi
             ;;
         xfs)
             if command -v xfs_repair >/dev/null 2>&1; then
-                ${LOGGER_CMD} "${ScriptName}: Running xfs_repair -e on ${dev}"
-                xfs_repair -e "${dev}" 2>&1 | while IFS= read -r line; do
+                # Use -n (no-modify) + -e (exit non-zero on errors) for a safe pre-mount check.
+                # Do NOT run xfs_repair without -n in an automount context: it will attempt live
+                # repair and, if the log is dirty, will exit non-zero without -L (which would
+                # destroy the log). XFS replays its own journal on mount; actual repair requires
+                # offline manual intervention (xfs_repair [-L]).
+                ${LOGGER_CMD} "${ScriptName}: Running xfs_repair -n -e on ${dev} (check only; no repair)"
+                xfs_repair -n -e "${dev}" 2>&1 | while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: xfs_repair: ${line}"
                 done
+                fsck_rc=${PIPESTATUS[0]}
+                if [[ ${fsck_rc} -ne 0 ]]; then
+                    # Non-fatal: XFS will attempt journal recovery on mount itself
+                    ${LOGGER_CMD} "${ScriptName}: WARNING — xfs_repair -n found errors on ${dev} (rc=${fsck_rc}); XFS will attempt journal recovery on mount"
+                fi
             fi
             ;;
         btrfs)
@@ -104,10 +156,20 @@ do_mount() {
 
     LABEL=$(${LSBLK_CMD} -no LABEL "${DEVICE}" 2>/dev/null || true)
 
+    # Sanitize the filesystem label to prevent path-traversal and injection:
+    #   '/' → '_'           blocks path escape (e.g. "../../etc" on NTFS)
+    #   control chars → ''  removes null, newline and other non-printable bytes
+    #   spaces → '_'        avoids /proc/mounts \040-escaping mismatches
+    #   leading dots → ''   blocks "." / ".." path segments
+    LABEL="$(printf '%s' "${LABEL}" \
+        | tr '/' '_' \
+        | tr -d '\001-\031\177' \
+        | sed 's/[[:space:]]/_/g; s/^\.*//')"
+
     if [[ -z "${LABEL}" ]]; then
         LABEL=${DEVBASE}
-    elif ${GREP_CMD} -q " ${MOUNT_PARENT_PATH}/${LABEL} " ${MOUNT_INFO}; then
-        # Already in use, make a unique one
+    elif /usr/bin/findmnt -n -o TARGET "${MOUNT_PARENT_PATH}/${LABEL}" >/dev/null 2>&1; then
+        # Mount point already in use — make a unique label
         LABEL+="-${DEVBASE}"
     fi
 
@@ -115,7 +177,10 @@ do_mount() {
     ${LOGGER_CMD} "${ScriptName}: Detected fstype=${FS_TYPE} on ${DEVICE}; target ${MOUNT_POINT}"
 
     # --- filesystem check (before mount) ---
-    do_fsck "${DEVICE}" "${FS_TYPE}"
+    if ! do_fsck "${DEVICE}" "${FS_TYPE}"; then
+        ${LOGGER_CMD} "${ScriptName}: Filesystem check failed on ${DEVICE}; aborting mount"
+        exit 1
+    fi
 
     if ! ${MKDIR_CMD} -p "${MOUNT_POINT}"; then
         ${LOGGER_CMD} "${ScriptName}: Failed to create mount point ${MOUNT_POINT}. Exiting."
@@ -175,9 +240,10 @@ do_mount() {
         exit 1
     fi
 
-    # Ensure mount propagation is shared to ${MOUNT_PARENT_PATH}
-    # So many headaches averted...
-    mount --make-shared "${MOUNT_PARENT_PATH}" 2>/dev/null || true
+    # Ensure mount propagation is shared recursively to ${MOUNT_PARENT_PATH}.
+    # --make-rshared (not --make-shared) is needed so that nested mounts
+    # (e.g. a second USB drive under /mnt) are also visible inside LXC containers.
+    mount --make-rshared "${MOUNT_PARENT_PATH}" 2>/dev/null || true
 
     ${LOGGER_CMD} "${ScriptName}: ${DEVICE} (${FS_TYPE}) mounted at ${MOUNT_POINT} — done"
 }
