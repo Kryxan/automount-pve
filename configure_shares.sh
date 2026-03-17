@@ -123,12 +123,13 @@ if [[ "${ENABLE_SMB}" == "yes" ]]; then
     if [[ -z "${SMB_ENGINE}" ]]; then
         warn "Neither ksmbd nor Samba is installed."
         if [[ -t 0 ]]; then
-            echo "  To install ksmbd: apt install ksmbd-tools"
+#            echo "  To install ksmbd: apt install ksmbd-tools"
             echo "  To install Samba: apt install samba"
-            if prompt_yn "Attempt to install ksmbd-tools now?" y; then
-                apt-get update -qq && apt-get install -y ksmbd-tools
-                SMB_ENGINE=ksmbd
-            elif prompt_yn "Attempt to install samba now?" n; then
+#            if prompt_yn "Attempt to install ksmbd-tools now?" y; then
+#                apt-get update -qq && apt-get install -y ksmbd-tools
+#                SMB_ENGINE=ksmbd
+#            elif prompt_yn "Attempt to install samba now?" n; then
+            if prompt_yn "Attempt to install samba now?" n; then
                 apt-get update -qq && apt-get install -y samba
                 SMB_ENGINE=samba
             fi
