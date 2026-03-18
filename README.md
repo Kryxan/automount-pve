@@ -201,7 +201,7 @@ with shared propagation, USB sub-mounts appear automatically.
 | NFS export not visible | `exportfs -v` to confirm; ensure client matches the allowed subnet |
 | Mount point collision | Two drives with the same label — second gets a `-<devname>` suffix automatically |
 
-### Compatibility
+## Compatibility
 
 | File | Item | PVE8 / Deb12 | PVE9 / Deb13 | Ubuntu 22/24 |
 | --- | --- | --- | --- | --- |
