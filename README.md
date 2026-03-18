@@ -5,36 +5,38 @@
 [![Shell Script](https://img.shields.io/badge/Shell-Bash-lightgrey?logo=gnu-bash)](https://www.gnu.org/software/bash/)
 
 Automount every partition (ext4 / NTFS / exFAT / FAT / XFS / btrfs) found on
-dynamically-attached USB storage to `/mnt/<label>`. NFS & SMB sharing configured
-along with recursive bind mounts to containers.
+dynamically-attached USB storage to `/mnt/<label>`. Supports both traditional
+SCSI/SATA USB drives **and NVMe USB enclosures**. Optional NFS & SMB sharing
+and recursive bind mounts for LXC containers.
 
-Updated for **Proxmox 9** (Debian Trixie). Should work on any systemd-based Debian 12+ system.
+Updated for **Proxmox 9** (Debian Trixie). Works on any systemd-based Debian 12+ or Ubuntu 22/24.
 
 ## Features
 
 | Feature | Details |
-|---|---|
+| --- | --- |
 | **Automatic mount/unmount** | udev rule triggers a systemd oneshot service on USB attach/detach |
-| **Filesystem check on mount** | `ntfsfix`, `fsck.vfat`, `e2fsck`, `xfs_repair` run before every mount |
-| **NTFS via ntfs-3g** | Uses the `ntfs-3g` FUSE driver instead of the kernel `ntfs` driver |
-| **NFS & SMB sharing** | Interactive setup (`configure_shares.sh`) shares the entire `/mnt` tree |
-| **LXC bind-mount fix** | `mnt-shared-propagation.service` addresses potential bind mount shared issue |
-| **installer** | Safe to re-run; fixes broken symlinks, sets correct `chmod`/`chown` |
-| **ZFS unit fix** | Removes deprecated `Requires=systemd-udev-settle` from ZFS import units (from original repo, is this still needed?) |
+| **NVMe USB enclosure support** | Matches `nvmeXnYpZ` devices connected via USB; internal NVMe drives are excluded |
+| **Filesystem check on mount** | `ntfsfix`, `fsck.vfat`, `fsck.exfat`, `e2fsck`, `xfs_repair` run before every mount |
+| **NTFS via ntfs-3g** | Prefers the `ntfs-3g` FUSE driver over the kernel `ntfs3` driver |
+| **NFS & SMB sharing** | Interactive setup (`configure_shares.sh`) with security prompts, backups, and idempotent config merge |
+| **LXC bind-mount fix** | `mnt-shared-propagation.service` + `add_rbind_mounts.sh` ensure USB sub-mounts are visible inside containers |
+| **Journal logging** | Mount/unmount output goes to the systemd journal — `journalctl -u usb-mount@<device>` |
+| **Safe installer** | Re-runnable; fixes broken symlinks, sets correct ownership/permissions |
+| **Label sanitisation** | Filesystem labels are sanitised to prevent path-traversal injection |
+| **ZFS unit fix** | Removes deprecated `Requires=systemd-udev-settle` from ZFS import units |
 
 ## Quick Start
-
-
 
 ```bash
 # Download and install
 curl -L https://github.com/Kryxan/automount-pve/archive/refs/heads/main.tar.gz | tar xz -C /tmp/
-cd /tmp/automount-pve-main  # The extracted folder will be named automount-pve-main
+cd /tmp/automount-pve-main
 ./installAutoMount.sh
 ```
 
+### Or clone with git
 
-# Or clone with git
 ```bash
 git clone https://github.com/Kryxan/automount-pve.git /opt/automount-pve
 cd /opt/automount-pve
@@ -42,6 +44,7 @@ cd /opt/automount-pve
 ```
 
 The installer will:
+
 1. Copy scripts to `/opt/automount-pve` and create symlinks in `/etc`.
 2. Set correct ownership (`root:root`) and permissions (`0755` / `0644`).
 3. Offer to install `ntfs-3g` and `exfatprogs` if missing.
@@ -50,6 +53,73 @@ The installer will:
 6. Prompt to configure NFS and/or SMB sharing of `/mnt`.
 
 **Test:** Plug in a USB drive and check `/mnt` for a new directory.
+
+## NVMe USB Enclosures
+
+External NVMe enclosures (USB-to-NVMe adapters) expose devices as
+`/dev/nvme0n1p1` instead of `/dev/sda1`. The udev rules match both patterns:
+
+| Pattern | Example | Match |
+| --- | --- | --- |
+| `sd[a-z][0-9]*` | `/dev/sda1`, `/dev/sdc12` | Traditional SCSI/SATA USB drives |
+| `nvme[0-9]*n[0-9]*p[0-9]*` | `/dev/nvme0n1p1` | NVMe-over-USB enclosures |
+
+**Safety:** Internal (non-USB) NVMe drives are excluded. The rules require
+either `ID_BUS==usb` (set by most USB-NVMe bridge chipsets) or both
+`removable==1` and `SUBSYSTEMS=="usb"`.
+
+> **Note:** If your NVMe enclosure is not detected, check
+> `udevadm info /dev/nvme0n1p1 | grep ID_BUS` — if `ID_BUS` is not set to
+> `usb`, the secondary rule (`removable==1` + `SUBSYSTEMS=="usb"`) should
+> still catch it. File an issue if neither works.
+
+## Security Warnings
+
+### SMB / Samba Sharing
+
+`configure_shares.sh` prompts for a guest-access mode before enabling SMB:
+
+| Mode | Behaviour |
+| --- | --- |
+| **guest** | Anyone on the network can browse and write. |
+| **users** | Only authenticated Samba users (via `smbpasswd`) can access. |
+| **subnet** | Guest access restricted to the specified subnet. |
+
+It also warns about **wide links** (symbolic links that escape the share root)
+and offers to disable them.
+
+> **Recommendation:** Use **users** mode in production. Never enable **guest**
+> on an untrusted network.
+
+### NFS Exports
+
+The NFS setup asks whether to use `root_squash` (default) or `no_root_squash`.
+Using `no_root_squash` allows the root user on NFS clients to act as root on
+the server — only enable this for trusted hosts.
+
+### Filesystem Labels
+
+Mount points are derived from filesystem labels. Malicious labels (e.g.
+`../../etc`) could attempt path-traversal. The mount script sanitises labels
+by replacing `/` with `_`, stripping control characters, spaces and leading dots.
+
+## Journal Logging
+
+All mount and unmount output is captured by the systemd journal:
+
+```bash
+# View logs for a specific device
+journalctl -u usb-mount@sda1
+
+# Follow in real-time
+journalctl -fu usb-mount@sda1
+
+# View NVMe mount logs
+journalctl -u usb-mount@nvme0n1p1
+
+# View all USB mount activity
+journalctl -u 'usb-mount@*'
+```
 
 ## LXC Container Visibility (Proxmox 9)
 
@@ -64,7 +134,7 @@ starts are not visible unless the mount point is marked **shared**.
 
 This project installs `mnt-shared-propagation.service` which runs:
 
-```
+```bash
 mount --make-rshared /mnt
 ```
 
@@ -75,35 +145,36 @@ I saw no issue with this simple step, I've included the fix to ensure
 ### The recursive bind mount exception
 
 USB drives mounted *before* the container can also experience a separate but similar
-issue. This was my issue after upgrading to Proxmox 9. I don't think I had this 
+issue. This was my issue after upgrading to Proxmox 9. I don't think I had this
 manifest as an issue in Proxmox 8.
 
 The typical bind mount does not propagate sub-mounts into containers (e.g. if a USB
 drive mounts at /mnt/usb, it won't appear inside the container).
-```
+
+```bash
 mp0: /mnt,mp=/mnt
 ```
 
 Instead, force a recursive bind mount:
-```
+
+```bash
 lxc.mount.entry: /mnt mnt none rbind,create=dir 0 0
 ```
 
 This makes the container's `/mnt` a direct view of the host's `/mnt` tree, and
 with shared propagation, USB sub-mounts appear automatically.
 
-
 ## File Overview
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `installAutoMount.sh` | Main installer — run this |
 | `mount_usb_memory.sh` | Mount/unmount handler called by the systemd service |
-| `configure_shares.sh` | Interactive NFS/SMB share setup for `/mnt` |
-| `add_rbind_mounts.sh` | Interactive configuration of containers for recursive bind mounts of `/mnt` |
-| `99-auto-mount-sdxy.rules` | udev rule that triggers `usb-mount@.service` |
-| `usb-mount@.service` | systemd template unit for mount/unmount |
-| `mnt-shared-propagation.service` | Ensures `/mnt` has shared mount propagation |
+| `configure_shares.sh` | Interactive NFS/SMB share setup for `/mnt` (with security prompts) |
+| `add_rbind_mounts.sh` | Interactive configuration of LXC containers for recursive bind mounts |
+| `99-auto-mount-sdxy.rules` | udev rules (SCSI/SATA + NVMe) that trigger `usb-mount@.service` |
+| `usb-mount@.service` | systemd template unit (journal-integrated) |
+| `mnt-shared-propagation.service` | Ensures `/mnt` has shared mount propagation for LXC |
 
 ## Important Notes
 
@@ -112,21 +183,35 @@ with shared propagation, USB sub-mounts appear automatically.
   it's the best solution, but we're all still waiting for `ntfs-LTE`)
 - **Mount labels:** The mount directory uses the partition label. If none exists, the
   device name (e.g. `sdc2`) is used. Duplicate labels get a device suffix.
+- **Backups:** `configure_shares.sh` creates timestamped backups of Samba/NFS configs
+  before any modification.
+- **Re-running:** Both the installer and `configure_shares.sh` are idempotent — they use
+  `# BEGIN/END automount-pve` markers and will cleanly replace previous entries.
 
+## Troubleshooting
 
-### Compatibility audit 
-provided by Github AI 
+| Problem | Check |
+| --- | --- |
+| USB drive not detected | `udevadm monitor --udev` while plugging in; verify rules with `udevadm test /sys/block/sda/sda1` |
+| NVMe enclosure not detected | `udevadm info /dev/nvme0n1p1 \| grep ID_BUS` — needs `usb` or `removable==1` |
+| Mounts but empty in LXC | `findmnt -o TARGET,PROPAGATION /mnt` should show `shared`; ensure `rbind` not `bind` in container config |
+| `ntfs-3g` not found | `apt install ntfs-3g` then re-plug the drive |
+| Filesystem check fails | Check `journalctl -u usb-mount@<device>` for fsck output; may need manual `fsck` |
+| SMB share not visible | Verify `smbd` / `ksmbd` is running; check `testparm` output |
+| NFS export not visible | `exportfs -v` to confirm; ensure client matches the allowed subnet |
+| Mount point collision | Two drives with the same label — second gets a `-<devname>` suffix automatically |
+
+### Compatibility
 
 | File | Item | PVE8 / Deb12 | PVE9 / Deb13 | Ubuntu 22/24 |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | mount_usb_memory.sh | `findmnt` (util-linux) | ✓ | ✓ | ✓ |
-| mount_usb_memory.sh | `/usr/sbin/blkid` | ✓ (`/usr/sbin`→`/usr/bin` symlink on Deb12+) | ✓ | ✓ |
+| mount_usb_memory.sh | `/usr/sbin/blkid` | ✓ | ✓ | ✓ |
 | mount_usb_memory.sh | `ntfs3` kernel driver | ✓ kernel 6.x | ✓ | ✓ kernel ≥5.15 |
-| installAutoMount.sh | `dpkg -s` check | ✓ Debian-only, intended | ✓ | ✓ |
+| installAutoMount.sh | `dpkg -s` check | ✓ | ✓ | ✓ |
 | installAutoMount.sh | `mountpoint -q` (util-linux) | ✓ | ✓ | ✓ |
-| configure_shares.sh | `ksmbd-tools` package | ✓ Deb12 | ✓ Deb13 | ✓ |
-| configure_shares.sh | `exfatprogs` package | ✓ Deb12 | ✓ Deb13 | ✓ |
-| mnt-shared-propagation.service | `Before=lxc.service pve-guests.service` | ✓ PVE-only units; missing units are silently ignored by systemd | ✓ | ✓ (units absent, ignored) |
-| 99-auto-mount-sdxy.rules | `sd[a-z][0-9]` | Only matches partitions 1–9 and devices `sda`–`sdz`; `sda10+` or `sdaa+` unmatched — acceptable for USB drives in practice | ✓ | ✓ |
-| All scripts | `#!/bin/bash` + `[[ ]]`, `${BASH_SOURCE[0]}`, etc. | ✓ bash ≥4.2 | ✓ | ✓ |
-
+| configure_shares.sh | `ksmbd-tools` package | ✓ | ✓ | ✓ |
+| configure_shares.sh | `exfatprogs` package | ✓ | ✓ | ✓ |
+| mnt-shared-propagation.service | `Before=lxc.service pve-guests.service` | ✓ PVE units; ignored if absent | ✓ | ✓ (ignored) |
+| 99-auto-mount-sdxy.rules | `sd[a-z][0-9]*` + `nvme*` | ✓ | ✓ | ✓ |
+| All scripts | `#!/bin/bash` + `[[ ]]`, `${BASH_SOURCE[0]}` | ✓ bash ≥4.2 | ✓ | ✓ |

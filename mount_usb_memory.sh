@@ -1,4 +1,8 @@
 #!/bin/bash
+# -u: treat unset variables as errors; -o pipefail: pipeline returns rightmost non-zero.
+# -e is intentionally omitted: this script uses explicit error handling and many
+# commands are expected to fail (e.g. findmnt when device is not mounted).
+set -uo pipefail
 
 # ---------------------------------------------------------------------------
 # mount_usb_memory.sh — automount/unmount handler for USB-attached storage
@@ -6,18 +10,20 @@
 # Called by usb-mount@.service via udev rules
 # Updated for Proxmox 9 (Debian Trixie)
 
-ACTION=$1
-DEVBASE=$2
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 {add|remove} DEVBASE" >&2
+    exit 1
+fi
+
+ACTION="$1"
+DEVBASE="$2"
 DEVICE="/dev/${DEVBASE}"
 
-MOUNT_INFO="/proc/mounts"
 MOUNT_PARENT_PATH="/mnt"
-SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 ScriptName="$(basename "$0")"
 
 MOUNT_CMD="/usr/bin/mount"
 UMOUNT_CMD="/usr/bin/umount"
-GREP_CMD="/usr/bin/grep"
 LSBLK_CMD="/usr/bin/lsblk"
 FIND_CMD="/usr/bin/find"
 MKDIR_CMD="/usr/bin/mkdir"
@@ -38,15 +44,15 @@ MOUNT_POINT=$(/usr/bin/findmnt -n -o TARGET -S "${DEVICE}" 2>/dev/null || true)
 # ---------------------------------------------------------------------------
 do_fsck() {
     local dev="$1" fstype="$2"
-    local fsck_rc=0
+    local fsck_rc=0 output=""
     case "${fstype}" in
         ntfs|ntfs3)
             if command -v ntfsfix >/dev/null 2>&1; then
                 ${LOGGER_CMD} "${ScriptName}: Running ntfsfix -d on ${dev}"
-                ntfsfix -d "${dev}" 2>&1 | while IFS= read -r line; do
+                output=$(ntfsfix -d "${dev}" 2>&1) || fsck_rc=$?
+                while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: ntfsfix: ${line}"
-                done
-                fsck_rc=${PIPESTATUS[0]}
+                done <<< "${output}"
                 if [[ ${fsck_rc} -ne 0 ]]; then
                     # Non-fatal: ntfs-3g can mount dirty volumes without ntfsfix succeeding
                     ${LOGGER_CMD} "${ScriptName}: WARNING — ntfsfix exited ${fsck_rc} on ${dev}; proceeding (ntfs-3g handles dirty volumes)"
@@ -58,10 +64,10 @@ do_fsck() {
         vfat)
             if command -v fsck.vfat >/dev/null 2>&1; then
                 ${LOGGER_CMD} "${ScriptName}: Running fsck.vfat -a on ${dev}"
-                fsck.vfat -a "${dev}" 2>&1 | while IFS= read -r line; do
+                output=$(fsck.vfat -a "${dev}" 2>&1) || fsck_rc=$?
+                while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: fsck.vfat: ${line}"
-                done
-                fsck_rc=${PIPESTATUS[0]}
+                done <<< "${output}"
                 # fsck.vfat: 0=clean/repaired, 1=fixable errors corrected, 2+=fatal
                 if [[ ${fsck_rc} -ge 2 ]]; then
                     ${LOGGER_CMD} "${ScriptName}: ERROR — fsck.vfat exited ${fsck_rc} on ${dev}; aborting mount"
@@ -74,10 +80,10 @@ do_fsck() {
         exfat)
             if command -v fsck.exfat >/dev/null 2>&1; then
                 ${LOGGER_CMD} "${ScriptName}: Running fsck.exfat -y on ${dev}"
-                fsck.exfat -y "${dev}" 2>&1 | while IFS= read -r line; do
+                output=$(fsck.exfat -y "${dev}" 2>&1) || fsck_rc=$?
+                while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: fsck.exfat: ${line}"
-                done
-                fsck_rc=${PIPESTATUS[0]}
+                done <<< "${output}"
                 # fsck.exfat: 0=clean, 1=errors corrected, 2+=uncorrectable
                 if [[ ${fsck_rc} -ge 2 ]]; then
                     ${LOGGER_CMD} "${ScriptName}: ERROR — fsck.exfat exited ${fsck_rc} on ${dev}; aborting mount"
@@ -90,10 +96,10 @@ do_fsck() {
         ext2|ext3|ext4)
             if command -v e2fsck >/dev/null 2>&1; then
                 ${LOGGER_CMD} "${ScriptName}: Running e2fsck -p on ${dev}"
-                e2fsck -p "${dev}" 2>&1 | while IFS= read -r line; do
+                output=$(e2fsck -p "${dev}" 2>&1) || fsck_rc=$?
+                while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: e2fsck: ${line}"
-                done
-                fsck_rc=${PIPESTATUS[0]}
+                done <<< "${output}"
                 # e2fsck exit codes are bitmasks:
                 #   bit 0 (1) = errors corrected
                 #   bit 1 (2) = errors corrected, reboot recommended (root fs; not relevant for USB)
@@ -115,10 +121,10 @@ do_fsck() {
                 # destroy the log). XFS replays its own journal on mount; actual repair requires
                 # offline manual intervention (xfs_repair [-L]).
                 ${LOGGER_CMD} "${ScriptName}: Running xfs_repair -n -e on ${dev} (check only; no repair)"
-                xfs_repair -n -e "${dev}" 2>&1 | while IFS= read -r line; do
+                output=$(xfs_repair -n -e "${dev}" 2>&1) || fsck_rc=$?
+                while IFS= read -r line; do
                     ${LOGGER_CMD} "${ScriptName}: xfs_repair: ${line}"
-                done
-                fsck_rc=${PIPESTATUS[0]}
+                done <<< "${output}"
                 if [[ ${fsck_rc} -ne 0 ]]; then
                     # Non-fatal: XFS will attempt journal recovery on mount itself
                     ${LOGGER_CMD} "${ScriptName}: WARNING — xfs_repair -n found errors on ${dev} (rc=${fsck_rc}); XFS will attempt journal recovery on mount"
@@ -250,7 +256,7 @@ do_mount() {
 
 # ---------------------------------------------------------------------------
 do_unmount() {
-    if [[ -n ${MOUNT_POINT} ]]; then
+    if [[ -n "${MOUNT_POINT}" ]]; then
         ${LOGGER_CMD} "${ScriptName}: Unmounting ${DEVICE} from ${MOUNT_POINT}"
         ${UMOUNT_CMD} -l "${DEVICE}"
     fi
@@ -259,7 +265,7 @@ do_unmount() {
     for f in "${MOUNT_PARENT_PATH}"/* ; do
         [[ -e "$f" ]] || continue
         if [[ -n $(${FIND_CMD} "$f" -maxdepth 0 -type d -empty 2>/dev/null) ]]; then
-            if ! ${GREP_CMD} -q " $f " ${MOUNT_INFO}; then
+            if ! /usr/bin/findmnt -n -o TARGET "$f" >/dev/null 2>&1; then
                 ${RMDIR_CMD} "$f" 2>/dev/null || true
             fi
         fi
