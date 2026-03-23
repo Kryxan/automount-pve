@@ -54,6 +54,9 @@ The installer will:
 
 **Test:** Plug in a USB drive and check `/mnt` for a new directory.
 
+**bug:** install is supposed to copy files over if they do not exist in /opt and while that works, running install from the /opt path still tries to copy and fails. I thought I fixed this, but apparently I did not. Best to download it to a temp path for now. Easy fix, but I may not address the issue right now. 
+
+
 ## NVMe USB Enclosures
 
 External NVMe enclosures (USB-to-NVMe adapters) expose devices as
