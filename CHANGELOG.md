@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v2.3.0]
+
+### Changed
+
+- **configure_shares.sh** — completely rewrote the entire `configure_shares.sh`
+  It was too complicated and convoluted and filled with "suggested" code to
+  conform to "best practices".
+  - CLI flags are gone.
+  - Just two prompts, security posture and config overwrite.
+  - Added some flags for Samba so it can be more MacOS friendly.
+  - `ksmbd` is bad, don't use it, I don't support it anymore.
+  - No more config merge. Just overwrite to output suggested settings for user.
+- **Security Posture** — Shares are set up with simple choices.
+  - **Open:** Good choice if you know your home network is secure.
+  - **Limited:** Some safety measures to limit the scope of accepted connections.
+  - **Secure:** Limit access to authenticated users and limit accepted connections.
+
 ## [v2.2.0]
 
 ### Added

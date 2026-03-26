@@ -29,18 +29,7 @@ Updated for **Proxmox 9** (Debian Trixie). Works on any systemd-based Debian 12+
 ## Quick Start
 
 ```bash
-# Download and install
-curl -L https://github.com/Kryxan/automount-pve/archive/refs/heads/main.tar.gz | tar xz -C /tmp/
-cd /tmp/automount-pve-main
-./installAutoMount.sh
-```
-
-### Or clone with git
-
-```bash
-git clone https://github.com/Kryxan/automount-pve.git /opt/automount-pve
-cd /opt/automount-pve
-./installAutoMount.sh
+curl -L https://github.com/Kryxan/automount-pve/archive/refs/heads/main.tar.gz | tar xz -C /tmp/ && /tmp/automount-pve-main/installAutoMount.sh
 ```
 
 The installer will:
@@ -53,9 +42,6 @@ The installer will:
 6. Prompt to configure NFS and/or SMB sharing of `/mnt`.
 
 **Test:** Plug in a USB drive and check `/mnt` for a new directory.
-
-**bug:** install is supposed to copy files over if they do not exist in /opt and while that works, running install from the /opt path still tries to copy and fails. I thought I fixed this, but apparently I did not. Best to download it to a temp path for now. Easy fix, but I may not address the issue right now. 
-
 
 ## NVMe USB Enclosures
 
@@ -78,27 +64,17 @@ either `ID_BUS==usb` (set by most USB-NVMe bridge chipsets) or both
 
 ## Security Warnings
 
-### SMB / Samba Sharing
+### NFS / Samba Sharing
 
-`configure_shares.sh` prompts for a guest-access mode before enabling SMB:
+`configure_shares.sh` prompts for a security posture:
 
-| Mode | Behaviour |
-| --- | --- |
-| **guest** | Anyone on the network can browse and write. |
-| **users** | Only authenticated Samba users (via `smbpasswd`) can access. |
-| **subnet** | Guest access restricted to the specified subnet. |
+- **Security Posture** — Shares are set up with simple choices.
+  - **Open:** Good choice if you know your home network is secure.
+  - **Limited:** Some safety measures to limit the scope of accepted connections.
+  - **Secure:** Limit access to authenticated users and limit accepted connections.
 
-It also warns about **wide links** (symbolic links that escape the share root)
-and offers to disable them.
-
-> **Recommendation:** Use **users** mode in production. Never enable **guest**
-> on an untrusted network.
-
-### NFS Exports
-
-The NFS setup asks whether to use `root_squash` (default) or `no_root_squash`.
-Using `no_root_squash` allows the root user on NFS clients to act as root on
-the server — only enable this for trusted hosts.
+> You can choose to overwrite your config or if you don't the config based on your
+> choices with be displayed at the command prompt for you to copy-paste (or ignore).
 
 ### Filesystem Labels
 
@@ -200,7 +176,7 @@ with shared propagation, USB sub-mounts appear automatically.
 | Mounts but empty in LXC | `findmnt -o TARGET,PROPAGATION /mnt` should show `shared`; ensure `rbind` not `bind` in container config |
 | `ntfs-3g` not found | `apt install ntfs-3g` then re-plug the drive |
 | Filesystem check fails | Check `journalctl -u usb-mount@<device>` for fsck output; may need manual `fsck` |
-| SMB share not visible | Verify `smbd` / `ksmbd` is running; check `testparm` output |
+| SMB share not visible | Verify `smbd` is running; check `testparm` output |
 | NFS export not visible | `exportfs -v` to confirm; ensure client matches the allowed subnet |
 | Mount point collision | Two drives with the same label — second gets a `-<devname>` suffix automatically |
 
@@ -213,8 +189,7 @@ with shared propagation, USB sub-mounts appear automatically.
 | mount_usb_memory.sh | `ntfs3` kernel driver | ✓ kernel 6.x | ✓ | ✓ kernel ≥5.15 |
 | installAutoMount.sh | `dpkg -s` check | ✓ | ✓ | ✓ |
 | installAutoMount.sh | `mountpoint -q` (util-linux) | ✓ | ✓ | ✓ |
-| configure_shares.sh | `ksmbd-tools` package | ✓ | ✓ | ✓ |
-| configure_shares.sh | `exfatprogs` package | ✓ | ✓ | ✓ |
+| installAutoMount.sh | `exfatprogs` package | ✓ | ✓ | ✓ |
 | mnt-shared-propagation.service | `Before=lxc.service pve-guests.service` | ✓ PVE units; ignored if absent | ✓ | ✓ (ignored) |
 | 99-auto-mount-sdxy.rules | `sd[a-z][0-9]*` + `nvme*` | ✓ | ✓ | ✓ |
 | All scripts | `#!/bin/bash` + `[[ ]]`, `${BASH_SOURCE[0]}` | ✓ bash ≥4.2 | ✓ | ✓ |

@@ -44,8 +44,16 @@ declare -A POSTURE_ROOT_SQUASH=(
     [secure]=root_squash
 )
 
-log()  { echo "[configure_shares] $*"; }
-warn() { echo "[configure_shares] WARNING: $*" >&2; }
+# Colours for terminal output (no-op when piped)
+if [[ -t 1 ]]; then
+    C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_RED=$'\e[31m'; C_RESET=$'\e[0m'
+else
+    C_GREEN=""; C_YELLOW=""; C_RED=""; C_RESET=""
+fi
+
+log()  { echo "${C_GREEN}[configure_shares]${C_RESET} $*"; }
+warn() { echo "${C_YELLOW}[configure_shares] WARNING:${C_RESET} $*" >&2; }
+err()  { echo "${C_RED}[configure_shares] ERROR:${C_RESET} $*" >&2; }
 
 prompt_yn() {
     local prompt ans def
@@ -80,7 +88,7 @@ detect_ifaces() {
 choose_posture() {
     local p
     if [[ -t 0 ]]; then
-        echo "Security warning summary:"
+        echo "${C_YELLOW}Security warning summary:${C_RESET}"
         echo "  - Guest SMB access lets unauthenticated clients access files."
         echo "  - Wide links + symlinks can expose files outside ${MOUNT_PARENT}."
         echo "  - NFS root_squash reduces risk; no_root_squash is less secure."
