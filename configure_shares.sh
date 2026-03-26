@@ -1,455 +1,242 @@
-#!/bin/bash
-
-# ---------------------------------------------------------------------------
-# configure_shares.sh — Interactively configure SMB (ksmbd) and/or NFS
-# sharing for the /mnt mount tree used by automount-pve.
-#
-# Repo: https://github.com/Kryxan/automount-pve
-# This shares /mnt as a single export so that dynamically-mounted USB
-# volumes automatically become visible to clients.
-#
-# Can be run interactively (prompts) or unattended with flags:
-#   --smb          enable SMB sharing (no prompt)
-#   --nfs          enable NFS sharing (no prompt)
-#   --no-smb       disable SMB sharing (no prompt)
-#   --no-nfs       disable NFS sharing (no prompt)
-#   --subnet CIDR  allowed subnet (default: auto-detect local /24)
-#   --guest-mode M SMB access mode: guest | users | subnet
-#   --wide-links   enable wide links in SMB share
-#   --no-wide-links disable wide links in SMB share
-#   --root-squash   use root_squash for NFS (default)
-#   --no-root-squash use no_root_squash for NFS
-#   --nfs-insecure  allow insecure NFS ports
+#!/usr/bin/env bash
 set -euo pipefail
+# ---------------------------------------------------------------------------
+# configure_shares.sh — Configure SMB (Samba/ksmbd) and NFS sharing for /mnt
+#
+# Security profiles:
+#   open    -> Samba guest + wide links + NFS no_root_squash
+#   limited -> Samba guest restricted to local interface/subnet + NFS root_squash
+#   secure  -> Samba valid users only, interface/subnet restricted, NFS disabled
+# ---------------------------------------------------------------------------
 
 MOUNT_PARENT="/mnt"
 SHARE_NAME="mnt"
-NFS_EXPORTS="/etc/exports.d/automount-pve.exports"
-KSMBD_CONF="/etc/ksmbd/ksmbd.conf"
 SAMBA_CONF="/etc/samba/smb.conf"
+NFS_EXPORTS="/etc/exports.d/automount-pve.exports"
 
-ENABLE_SMB=""
-ENABLE_NFS=""
-SUBNET=""
+declare -A POSTURE_SMB_GUEST=(
+    [open]=yes
+    [limited]=yes
+    [secure]=no
+)
 
-# SMB security options (set by prompts or flags)
-SMB_GUEST_MODE=""        # guest | users | subnet
-SMB_WIDE_LINKS=""        # yes | no
-SMB_VALID_USERS=""       # username or @group
+declare -A POSTURE_WIDE_LINKS=(
+    [open]=yes
+    [limited]=no
+    [secure]=no
+)
 
-# NFS security options
-NFS_ROOT_SQUASH=""       # root_squash | no_root_squash
-NFS_INSECURE=""          # insecure | (empty for secure)
+declare -A POSTURE_RESTRICT_NET=(
+    [open]=no
+    [limited]=yes
+    [secure]=yes
+)
 
-# Config-merge markers
-MARKER_BEGIN="# BEGIN automount-pve"
-MARKER_END="# END automount-pve"
+declare -A POSTURE_ENABLE_NFS=(
+    [open]=yes
+    [limited]=yes
+    [secure]=no
+)
 
-# ---------------------------------------------------------------------------
-# Parse CLI flags (for unattended / re-run from installer)
-# ---------------------------------------------------------------------------
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --smb)     ENABLE_SMB=yes ;;
-        --no-smb)  ENABLE_SMB=no  ;;
-        --nfs)     ENABLE_NFS=yes ;;
-        --no-nfs)  ENABLE_NFS=no  ;;
-        --subnet)        shift; SUBNET="${1:-}" ;;
-        --guest-mode)    shift; SMB_GUEST_MODE="${1:-}" ;;
-        --wide-links)    SMB_WIDE_LINKS=yes ;;
-        --no-wide-links) SMB_WIDE_LINKS=no ;;
-        --root-squash)   NFS_ROOT_SQUASH=root_squash ;;
-        --no-root-squash) NFS_ROOT_SQUASH=no_root_squash ;;
-        --nfs-insecure)  NFS_INSECURE=insecure ;;
-        *) echo "Unknown flag: $1" >&2; exit 1 ;;
-    esac
-    shift
-done
+declare -A POSTURE_ROOT_SQUASH=(
+    [open]=no_root_squash
+    [limited]=root_squash
+    [secure]=root_squash
+)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 log()  { echo "[configure_shares] $*"; }
 warn() { echo "[configure_shares] WARNING: $*" >&2; }
 
-detect_subnet() {
-    # Grab the first non-loopback IPv4 address and derive a /24
-    local ip
-    ip=$(ip -4 -o addr show scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')
-    if [[ -n "${ip}" ]]; then
-        echo "${ip%.*}.0/24"
-    else
-        echo "192.168.1.0/24"
-    fi
-}
-
 prompt_yn() {
-    # $1=prompt  $2=default (y/n)
-    local answer
+    local prompt ans def
+    prompt="$1" def="$2"
+    [[ -t 0 ]] || return 0
     while true; do
-        read -rp "$1 [$([ "$2" = y ] && echo 'Y/n' || echo 'y/N')]: " answer
-        answer="${answer:-$2}"
-        case "${answer,,}" in
-            y|yes) return 0 ;;
-            n|no)  return 1 ;;
-            *) echo "Please answer y or n." ;;
-        esac
-    done
-}
-
-prompt_choice() {
-    # $1=prompt $2=valid choices string $3=default
-    local prompt="$1" choices="$2" default="$3" answer
-    while true; do
-        read -rp "${prompt} [${default}]: " answer
-        answer="${answer:-${default}}"
-        if [[ "${choices}" == *"${answer}"* ]]; then
-            echo "${answer}"
-            return 0
-        fi
-        echo "Invalid choice. Options: ${choices}" >&2
+        read -rp "$prompt [$def]: " ans
+        ans="${ans:-$def}"
+        case "${ans,,}" in y|yes) return 0 ;; n|no) return 1 ;; esac
     done
 }
 
 backup_file() {
-    local file="$1"
-    if [[ -f "${file}" ]]; then
-        local ts
-        ts="$(date +%Y%m%d%H%M%S)"
-        local backup="${file}.bak.${ts}"
-        cp -a "${file}" "${backup}"
-        log "Backed up ${file} → ${backup}"
-    fi
+    local f ts
+    f="$1"
+    [[ -f "$f" ]] || return
+    ts="$(date +%Y%m%d%H%M%S)"
+    cp -a "$f" "$f.bak.$ts"
+    log "Backed up $f -> $f.bak.$ts"
 }
 
-remove_marked_block() {
-    local file="$1"
-    if [[ -f "${file}" ]] && grep -qF "${MARKER_BEGIN}" "${file}"; then
-        sed -i "/^${MARKER_BEGIN}$/,/^${MARKER_END}$/d" "${file}"
-        log "Removed existing automount-pve block from ${file}"
-    fi
+detect_subnet() {
+    local ip
+    ip=$(ip -4 -o addr show scope global | awk 'NR==1 {split($4,a,"/"); print a[1]}')
+    [[ -n "$ip" ]] && echo "${ip%.*}.0/24" || echo "192.168.1.0/24"
 }
 
-# ---------------------------------------------------------------------------
-# Interactive prompts (only when flags were not provided)
-# ---------------------------------------------------------------------------
-if [[ -z "${ENABLE_SMB}" ]] && [[ -t 0 ]]; then
-    if prompt_yn "Configure SMB (Samba/ksmbd) sharing for ${MOUNT_PARENT}?" y; then
-        ENABLE_SMB=yes
-    else
-        ENABLE_SMB=no
-    fi
-elif [[ -z "${ENABLE_SMB}" ]]; then
-    ENABLE_SMB=no
-fi
+detect_ifaces() {
+    ip -o -4 addr show scope global | awk '{print $2}' | sort -u | paste -sd' ' -
+}
 
-if [[ -z "${ENABLE_NFS}" ]] && [[ -t 0 ]]; then
-    if prompt_yn "Configure NFS sharing for ${MOUNT_PARENT}?" y; then
-        ENABLE_NFS=yes
-    else
-        ENABLE_NFS=no
-    fi
-elif [[ -z "${ENABLE_NFS}" ]]; then
-    ENABLE_NFS=no
-fi
-
-if [[ "${ENABLE_SMB}" == "no" && "${ENABLE_NFS}" == "no" ]]; then
-    log "No shares requested. Nothing to do."
-    exit 0
-fi
-
-if [[ -z "${SUBNET}" ]]; then
-    local_subnet=$(detect_subnet)
+choose_posture() {
+    local p
     if [[ -t 0 ]]; then
-        read -rp "Allowed subnet [${local_subnet}]: " SUBNET
-        SUBNET="${SUBNET:-${local_subnet}}"
+        echo "Security warning summary:"
+        echo "  - Guest SMB access lets unauthenticated clients access files."
+        echo "  - Wide links + symlinks can expose files outside ${MOUNT_PARENT}."
+        echo "  - NFS root_squash reduces risk; no_root_squash is less secure."
+        echo ""
+        echo "Security profiles:"
+        echo "  open    -> guest ok, wide links, NFS no_root_squash"
+        echo "  limited -> guest ok, no wide links, subnet restricted, NFS root_squash"
+        echo "  secure  -> valid users only, subnet restricted, NFS disabled"
+        echo ""
+        read -rp "Choose posture (open/limited/secure) [open]: " p
+        echo ""
+        POSTURE="${p:-open}"
     else
-        SUBNET="${local_subnet}"
+        POSTURE="open"
     fi
-fi
+}
 
-log "Sharing ${MOUNT_PARENT} — SMB=${ENABLE_SMB} NFS=${ENABLE_NFS} subnet=${SUBNET}"
-
-# ===========================================================================
-# SMB Configuration
-# ===========================================================================
-if [[ "${ENABLE_SMB}" == "yes" ]]; then
-    # Detect which SMB server is available (prefer Samba over ksmbd)
-    SMB_ENGINE=""
-    if command -v smbd >/dev/null 2>&1; then
-        SMB_ENGINE=samba
-    elif command -v ksmbd.control >/dev/null 2>&1; then
-        SMB_ENGINE=ksmbd
+install_samba_if_needed() {
+    if ! command -v smbd >/dev/null 2>&1; then
+        warn "Samba not installed. Installing..."
+        apt-get update -qq && apt-get install -y samba
     fi
+}
 
-    if [[ -z "${SMB_ENGINE}" ]]; then
-        warn "Neither Samba nor ksmbd is installed."
-        if [[ -t 0 ]]; then
-            echo "  To install Samba: apt install samba"
-            if prompt_yn "Install samba now?" n; then
-                apt-get update -qq && apt-get install -y samba
-                SMB_ENGINE=samba
-            fi
-        fi
+install_nfs_if_needed() {
+    [[ "${POSTURE_ENABLE_NFS[$POSTURE]}" == "yes" ]] || return
+    if ! command -v exportfs >/dev/null 2>&1; then
+        warn "NFS server not installed. Installing..."
+        apt-get update -qq && apt-get install -y nfs-kernel-server
     fi
+}
 
-    if [[ -n "${SMB_ENGINE}" ]]; then
-        # --- Security prompts (before any config changes) ---
-        if [[ -z "${SMB_GUEST_MODE}" ]] && [[ -t 0 ]]; then
-            echo ""
-            echo "SMB access control — choose how clients authenticate:"
-            echo "  A) Guest access (anyone can read/write — easy but insecure)"
-            echo "  B) Require valid Samba users (more secure)"
-            echo "  C) Guest access restricted to LAN subnet only (${SUBNET})"
-            echo ""
-            local_choice=$(prompt_choice "Select access mode (A/B/C)" "AaBbCc" "C")
-            case "${local_choice,,}" in
-                a) SMB_GUEST_MODE=guest ;;
-                b) SMB_GUEST_MODE=users ;;
-                c) SMB_GUEST_MODE=subnet ;;
-            esac
-        fi
-        SMB_GUEST_MODE="${SMB_GUEST_MODE:-subnet}"
+render_samba_config() {
+    local guest wide restrict subnet iface hosts
+    guest="${POSTURE_SMB_GUEST[$POSTURE]}"
+    wide="${POSTURE_WIDE_LINKS[$POSTURE]}"
+    restrict="${POSTURE_RESTRICT_NET[$POSTURE]}"
 
-        if [[ "${SMB_GUEST_MODE}" == "users" && -z "${SMB_VALID_USERS}" ]] && [[ -t 0 ]]; then
-            read -rp "Samba valid users (e.g. 'user1 user2' or '@group') [root]: " SMB_VALID_USERS
-        fi
-        SMB_VALID_USERS="${SMB_VALID_USERS:-root}"
-
-        if [[ -z "${SMB_WIDE_LINKS}" ]] && [[ -t 0 ]]; then
-            echo ""
-            echo "Symlink support in SMB shares:"
-            echo "  Enabling 'wide links' and 'follow symlinks' allows symlinks"
-            echo "  inside ${MOUNT_PARENT} to point to locations outside that directory."
-            echo ""
-            echo "  SECURITY WARNING: This means an attacker who can create a symlink"
-            echo "  on a USB drive could potentially expose any file on the system"
-            echo "  (e.g. /etc/shadow) to SMB clients."
-            echo ""
-            if prompt_yn "Enable wide links and follow symlinks?" n; then
-                SMB_WIDE_LINKS=yes
-            else
-                SMB_WIDE_LINKS=no
-            fi
-        fi
-        SMB_WIDE_LINKS="${SMB_WIDE_LINKS:-no}"
+    if [[ "$restrict" == "yes" ]]; then
+        subnet="$(detect_subnet)"
+        iface="$(detect_ifaces)"
+        hosts="$subnet fe80::/10 127.0.0.0/8"
     fi
 
-    if [[ "${SMB_ENGINE}" == "ksmbd" ]]; then
-        log "Configuring ksmbd (${KSMBD_CONF})"
-        backup_file "${KSMBD_CONF}"
-        mkdir -p "$(dirname "${KSMBD_CONF}")"
-        HOSTS_ALLOW="${SUBNET%.*}. 127."
-        cat > "${KSMBD_CONF}" <<EOF
-${MARKER_BEGIN}
+    cat <<EOF
 [global]
-   netbios name = files
-   server string = Proxmox USB Automount Share
    workgroup = WORKGROUP
-   map to guest = Bad User
-   guest account = nobody
-   hosts allow = ${HOSTS_ALLOW}
+   server string = Proxmox USB Automount Share
+
+   log file = /var/log/samba/log.%m
+   max log size = 1000
+   logging = file
+   panic action = /usr/share/samba/panic-action %d
+   server role = standalone server
+   obey pam restrictions = yes
+   usershare allow guests = yes
+
+$( [[ "$guest" == "yes" ]] && echo "   map to guest = Bad User
+   guest account = nobody" )
+
+$( [[ "$wide" == "yes" ]] && echo "   unix extensions = no
+   allow insecure wide links = yes" )
+
+$( [[ "$restrict" == "yes" ]] && echo "   hosts allow = $hosts
+   interfaces = lo $iface
+   bind interfaces only = yes" )
+
+# MacOS compatibility settings
+# do not ever add time machine support or spotlight indexing
+   vfs objects = fruit streams_xattr
+   fruit:metadata = stream
+   fruit:resource = stream
+   fruit:locking = none
+   fruit:encoding = native
+   fruit:posix_rename = yes
+   fruit:veto_appledouble = no
+   fruit:wipe_intentionally_left_blank_rfork = yes
+   fruit:delete_empty_adfiles = yes
+   fruit:aapl = yes
+   veto files = /._*/.DS_Store/.TemporaryItems/.Trashes/
+   delete veto files = yes
+   case sensitive = auto
+   directory name cache size = 0
+   kernel share modes = no
 
 [${SHARE_NAME}]
    path = ${MOUNT_PARENT}
-   comment = Automounted USB storage
-   read only = no
-   guest ok = yes
-   force user = root
-   force group = root
+   browseable = yes
+   writable = yes
    create mask = 0664
    directory mask = 0775
-${MARKER_END}
+
+$( [[ "$guest" == "yes" ]] && echo "   guest ok = yes
+   force user = root
+   force group = root" || echo "   guest ok = no
+   valid users = root" )
+
+$( [[ "$wide" == "yes" ]] && echo "   wide links = yes
+   follow symlinks = yes" )
 EOF
-        if systemctl is-active --quiet ksmbd 2>/dev/null; then
-            if ksmbd.control -r 2>/dev/null; then
-                log "ksmbd reloaded"
-            else
-                systemctl restart ksmbd
-            fi
-        else
-            systemctl enable --now ksmbd 2>/dev/null || warn "Could not start ksmbd"
-        fi
+}
 
-    elif [[ "${SMB_ENGINE}" == "samba" ]]; then
-        log "Configuring Samba (${SAMBA_CONF})"
+apply_samba() {
+    install_samba_if_needed
+    local cfg
+    cfg="$(render_samba_config)"
 
-        # Detect if smb.conf has been customized from package default
-        local_customized=false
-        if [[ -f "${SAMBA_CONF}" ]]; then
-            if command -v dpkg >/dev/null 2>&1; then
-                if dpkg -V samba-common 2>/dev/null | grep -q "smb.conf"; then
-                    local_customized=true
-                fi
-            else
-                local_total=$(grep -c '^\[' "${SAMBA_CONF}" 2>/dev/null || echo 0)
-                local_standard=$(grep -cE '^\[(global|homes|printers|print\$)\]' "${SAMBA_CONF}" 2>/dev/null || echo 0)
-                if (( local_total > local_standard )); then
-                    local_customized=true
-                fi
-            fi
-        fi
-
-        if [[ "${local_customized}" == true ]]; then
-            log "Detected customized smb.conf — preserving existing settings"
-        else
-            log "smb.conf appears to be default — safe to modify"
-        fi
-
-        # 1. Backup original config
-        backup_file "${SAMBA_CONF}"
-
-        # 2. Remove existing automount-pve block (idempotent)
-        remove_marked_block "${SAMBA_CONF}"
-
-        # 3. Comment out conflicting lines in [global] if customized
-        if [[ "${local_customized}" == true ]]; then
-            for local_key in "workgroup" "server string" "map to guest" "guest account" "unix extensions" "allow insecure wide links"; do
-                if grep -qi "^[[:space:]]*${local_key}[[:space:]]*=" "${SAMBA_CONF}" 2>/dev/null; then
-                    sed -i "/^\[global\]/,/^\[/{
-                        /^[[:space:]]*${local_key}[[:space:]]*=/I s/^/# automount-pve-disabled: /
-                    }" "${SAMBA_CONF}"
-                    log "Commented out conflicting '${local_key}' in ${SAMBA_CONF}"
-                fi
-            done
-        fi
-
-        # 4. Build and append the configuration block
-        {
-            echo ""
-            echo "${MARKER_BEGIN}"
-            echo "[global]"
-            echo "   workgroup = WORKGROUP"
-            echo "   server string = Files"
-            case "${SMB_GUEST_MODE}" in
-                guest|subnet)
-                    echo "   map to guest = Bad User"
-                    echo "   guest account = nobody"
-                    ;;
-            esac
-            if [[ "${SMB_WIDE_LINKS}" == "yes" ]]; then
-                echo "   unix extensions = no"
-                echo "   allow insecure wide links = yes"
-            fi
-            if [[ "${SMB_GUEST_MODE}" == "subnet" ]]; then
-                echo "   hosts allow = ${SUBNET} 127.0.0.0/8"
-            fi
-            echo ""
-            echo "[${SHARE_NAME}]"
-            echo "   path = ${MOUNT_PARENT}"
-            echo "   comment = Automounted USB storage"
-            echo "   browseable = yes"
-            echo "   writable = yes"
-            case "${SMB_GUEST_MODE}" in
-                guest|subnet)
-                    echo "   guest ok = yes"
-                    echo "   force user = root"
-                    echo "   force group = root"
-                    ;;
-                users)
-                    echo "   guest ok = no"
-                    echo "   valid users = ${SMB_VALID_USERS}"
-                    ;;
-            esac
-            echo "   create mask = 0664"
-            echo "   directory mask = 0775"
-            if [[ "${SMB_WIDE_LINKS}" == "yes" ]]; then
-                echo "   wide links = yes"
-                echo "   follow symlinks = yes"
-            fi
-            echo "${MARKER_END}"
-        } >> "${SAMBA_CONF}"
-        log "Appended automount-pve SMB configuration to ${SAMBA_CONF}"
-
-        # 5. Restart/reload Samba
-        systemctl enable --now smbd 2>/dev/null || warn "Could not start smbd"
-        systemctl reload smbd 2>/dev/null || systemctl restart smbd 2>/dev/null || true
-        log "Samba configuration applied"
-    else
-        warn "No SMB server available — skipping SMB configuration."
-    fi
-fi
-
-# ===========================================================================
-# NFS Configuration
-# ===========================================================================
-if [[ "${ENABLE_NFS}" == "yes" ]]; then
-    if ! command -v exportfs >/dev/null 2>&1; then
-        warn "NFS server tools not installed."
-        if [[ -t 0 ]]; then
-            if prompt_yn "Install nfs-kernel-server now?" y; then
-                apt-get update -qq && apt-get install -y nfs-kernel-server
-            fi
+    if [[ -f "$SAMBA_CONF" && -t 0 ]]; then
+        if ! prompt_yn "Overwrite existing $SAMBA_CONF? [default: yes]" "y"; then
+          warn "Keeping existing $SAMBA_CONF."
+          echo "Here is the generated configuration if you want to implement it manually:"
+          echo ""
+          printf '%s\n' "$cfg"
+          echo ""
+          return
         fi
     fi
 
-    if command -v exportfs >/dev/null 2>&1; then
-        # Check for existing custom exports in /etc/exports
-        if [[ -f /etc/exports ]]; then
-            local_custom_lines=$(grep -cvE '^[[:space:]]*(#|$)' /etc/exports 2>/dev/null || echo 0)
-            if (( local_custom_lines > 0 )); then
-                log "Detected ${local_custom_lines} existing export(s) in /etc/exports — these will NOT be modified."
-            fi
-        fi
+    backup_file "$SAMBA_CONF"
+    printf '%s\n' "$cfg" > "$SAMBA_CONF"
+    systemctl enable --now smbd || warn "Could not start smbd"
+    systemctl reload smbd || true
+    log "Samba configured."
+}
 
-        # --- NFS security prompts ---
-        if [[ -z "${NFS_ROOT_SQUASH}" ]] && [[ -t 0 ]]; then
-            echo ""
-            echo "NFS root squash:"
-            echo "  root_squash    — remote root is mapped to nobody (more secure)"
-            echo "  no_root_squash — remote root retains root privileges (less secure)"
-            echo ""
-            if prompt_yn "Enable root_squash (recommended)?" y; then
-                NFS_ROOT_SQUASH=root_squash
-            else
-                NFS_ROOT_SQUASH=no_root_squash
-            fi
-        fi
-        NFS_ROOT_SQUASH="${NFS_ROOT_SQUASH:-root_squash}"
+apply_nfs() {
+    [[ "${POSTURE_ENABLE_NFS[$POSTURE]}" == "yes" ]] || {
+        log "NFS disabled by posture."
+        return
+    }
 
-        if [[ -z "${NFS_INSECURE}" ]] && [[ -t 0 ]]; then
-            echo ""
-            echo "NFS port security:"
-            echo "  'secure'   — only accept connections from ports < 1024 (default)"
-            echo "  'insecure' — accept connections from any port (needed for macOS clients)"
-            echo ""
-            if prompt_yn "Allow insecure ports (for macOS compatibility)?" n; then
-                NFS_INSECURE=insecure
-            else
-                NFS_INSECURE=""
-            fi
-        fi
+    install_nfs_if_needed
 
-        log "Configuring NFS export (${NFS_EXPORTS})"
-        mkdir -p "$(dirname "${NFS_EXPORTS}")"
+    local subnet opts
+    subnet="$(detect_subnet)"
+    opts="rw,sync,no_subtree_check,crossmnt,fsid=0,${POSTURE_ROOT_SQUASH[$POSTURE]},insecure"
 
-        # Backup existing export file
-        backup_file "${NFS_EXPORTS}"
-
-        # Remove existing automount-pve block (idempotent)
-        remove_marked_block "${NFS_EXPORTS}"
-
-        # Build NFS options
-        # crossmnt causes the server to automatically export sub-mounts (USB drives)
-        local_nfs_opts="rw,sync,no_subtree_check,crossmnt,fsid=0"
-        local_nfs_opts+=",${NFS_ROOT_SQUASH}"
-        if [[ "${NFS_INSECURE}" == "insecure" ]]; then
-            local_nfs_opts+=",insecure"
-        fi
-
-        # Write export file with markers
-        cat > "${NFS_EXPORTS}" <<EOF
-${MARKER_BEGIN}
-# automount-pve: export ${MOUNT_PARENT} with crossmnt so USB sub-mounts are visible
-${MOUNT_PARENT}  ${SUBNET}(${local_nfs_opts})
-${MARKER_END}
+    backup_file "$NFS_EXPORTS"
+    cat > "$NFS_EXPORTS" <<EOF
+${MOUNT_PARENT}  ${subnet}(${opts})
+${MOUNT_PARENT}  fe80::/10(${opts})
 EOF
-        exportfs -ra 2>/dev/null || true
-        systemctl enable --now nfs-kernel-server 2>/dev/null || warn "Could not start nfs-kernel-server"
-        log "NFS export active"
-    else
-        warn "exportfs not found — skipping NFS configuration."
-    fi
-fi
 
-log "Share configuration complete."
+    exportfs -ra || true
+    systemctl enable --now nfs-kernel-server || warn "Could not start NFS"
+    log "NFS configured."
+}
+
+main() {
+    choose_posture
+    log "Selected posture: $POSTURE"
+
+    apply_samba
+    apply_nfs
+
+    log "Share configuration complete."
+}
+
+main "$@"
