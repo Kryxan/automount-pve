@@ -47,34 +47,30 @@ The installer will:
  
 ## Filesystem Labels
 
-Mount points are derived from filesystem labels. Malicious labels (e.g.
-`../../etc`) could attempt path-traversal. The mount script sanitises labels
-by replacing `/` with `_`, stripping control characters, spaces and leading dots.
-
-- If partition label does not exists, the device name (e.g. `sdc2`) is used. Duplicate labels get a device suffix.
+Mount points are derived from filesystem labels.
 
 | Device | Filesystem Label | Mountpoint |
 | --- | --- | --- |
 | `/dev/sda1` | `Entertainment` | `/mnt/Entertainment` |
 | `/dev/nvme0n1p1` | `Backup` | `/mnt/Backup` |
 
+- Malicious labels (e.g. `../../etc`) could attempt path-traversal. The mount script sanitises labels
+by replacing `/` with `_`, stripping control characters, spaces and leading dots.
+- If partition label does not exists, the device name (e.g. `sdc2`) is used. Duplicate labels get a device suffix.
+
 ## NVMe USB Enclosures
 External NVMe enclosures (USB-to-NVMe adapters) expose devices as
 `/dev/nvme0n1p1` instead of `/dev/sda1`. The udev rules match both patterns:
-
-- Internal (non-USB) NVMe drives are excluded.
-- The rules require either `ID_BUS==usb` (set by most USB-NVMe bridge chipsets) or both `removable==1` and `SUBSYSTEMS=="usb"`.
 
 | Pattern | Example | Match |
 | --- | --- | --- |
 | `sd[a-z][0-9]*` | `/dev/sda1`, `/dev/sdc12` | Traditional SCSI/SATA USB drives |
 | `nvme[0-9]*n[0-9]*p[0-9]*` | `/dev/nvme0n1p1` | NVMe-over-USB enclosures |
 
-
-> **Troubleshooting:** If your NVMe enclosure is not detected, check
-> `udevadm info /dev/nvme0n1p1 | grep ID_BUS` — if `ID_BUS` is not set to
-> `usb`, the secondary rule (`removable==1` + `SUBSYSTEMS=="usb"`) should
-> still catch it. File an issue if neither works.
+- Internal (non-USB) NVMe drives are excluded.
+- The rules require either `ID_BUS==usb` (set by most USB-NVMe bridge chipsets) or both `removable==1` and `SUBSYSTEMS=="usb"`.
+- If your NVMe enclosure is not detected, check `udevadm info /dev/nvme0n1p1 | grep ID_BUS` — if `ID_BUS` is not set to
+`usb`, the secondary rule (`removable==1` + `SUBSYSTEMS=="usb"`) should still catch it. File an issue if neither works.
 
 
 ## NFS / Samba Sharing
@@ -86,10 +82,9 @@ External NVMe enclosures (USB-to-NVMe adapters) expose devices as
   - **Limited:** Some safety measures to limit the scope of accepted connections.
   - **Secure:** Limit access to authenticated users and limit accepted connections.
 
-You can choose to overwrite your config or if you don't the config based on your
+- You can choose to overwrite your config or if you don't the config based on your
 choices with be displayed at the command prompt for you to copy-paste (or ignore).
-
-- **Backups:** `configure_shares.sh` creates timestamped backups of Samba/NFS configs
+- `configure_shares.sh` creates timestamped backups of Samba/NFS configs
   before any modification.
 
 
