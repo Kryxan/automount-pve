@@ -37,34 +37,47 @@ The installer will:
 1. Copy scripts to `/opt/automount-pve` and create symlinks in `/etc`.
 2. Set correct ownership (`root:root`) and permissions (`0755` / `0644`).
 3. Offer to install `ntfs-3g` and `exfatprogs` if missing.
+   - Without `ntfs-3g` the kernel NTFS driver may mount read-only on dirty volumes.
+   - Without `exfatprogs` file system checks for exFAT (and earlier varients) may not successfully run.
 4. Install `mnt-shared-propagation.service` (mount propagation fix for LXC).
 5. Override ZFS units if they depend on the deprecated `systemd-udev-settle`.
 6. Prompt to configure NFS and/or SMB sharing of `/mnt`.
 
 **Test:** Plug in a USB drive and check `/mnt` for a new directory.
+ 
+## Filesystem Labels
+
+Mount points are derived from filesystem labels. Malicious labels (e.g.
+`../../etc`) could attempt path-traversal. The mount script sanitises labels
+by replacing `/` with `_`, stripping control characters, spaces and leading dots.
+
+- If partition label does not exists, the device name (e.g. `sdc2`) is used. Duplicate labels get a device suffix.
+
+| Device | Filesystem Label | Mountpoint |
+| --- | --- | --- |
+| `/dev/sda1` | `Entertainment` | `/mnt/Entertainment` |
+| `/dev/nvme0n1p1` | `Backup` | `/mnt/Backup` |
 
 ## NVMe USB Enclosures
-
 External NVMe enclosures (USB-to-NVMe adapters) expose devices as
 `/dev/nvme0n1p1` instead of `/dev/sda1`. The udev rules match both patterns:
+
+- Internal (non-USB) NVMe drives are excluded.
+- The rules require either `ID_BUS==usb` (set by most USB-NVMe bridge chipsets) or both `removable==1` and `SUBSYSTEMS=="usb"`.
 
 | Pattern | Example | Match |
 | --- | --- | --- |
 | `sd[a-z][0-9]*` | `/dev/sda1`, `/dev/sdc12` | Traditional SCSI/SATA USB drives |
 | `nvme[0-9]*n[0-9]*p[0-9]*` | `/dev/nvme0n1p1` | NVMe-over-USB enclosures |
 
-**Safety:** Internal (non-USB) NVMe drives are excluded. The rules require
-either `ID_BUS==usb` (set by most USB-NVMe bridge chipsets) or both
-`removable==1` and `SUBSYSTEMS=="usb"`.
 
-> **Note:** If your NVMe enclosure is not detected, check
+> **Troubleshooting:** If your NVMe enclosure is not detected, check
 > `udevadm info /dev/nvme0n1p1 | grep ID_BUS` — if `ID_BUS` is not set to
 > `usb`, the secondary rule (`removable==1` + `SUBSYSTEMS=="usb"`) should
 > still catch it. File an issue if neither works.
 
-## Security Warnings
 
-### NFS / Samba Sharing
+## NFS / Samba Sharing
 
 `configure_shares.sh` prompts for a security posture:
 
@@ -73,14 +86,12 @@ either `ID_BUS==usb` (set by most USB-NVMe bridge chipsets) or both
   - **Limited:** Some safety measures to limit the scope of accepted connections.
   - **Secure:** Limit access to authenticated users and limit accepted connections.
 
-> You can choose to overwrite your config or if you don't the config based on your
-> choices with be displayed at the command prompt for you to copy-paste (or ignore).
+You can choose to overwrite your config or if you don't the config based on your
+choices with be displayed at the command prompt for you to copy-paste (or ignore).
 
-### Filesystem Labels
+- **Backups:** `configure_shares.sh` creates timestamped backups of Samba/NFS configs
+  before any modification.
 
-Mount points are derived from filesystem labels. Malicious labels (e.g.
-`../../etc`) could attempt path-traversal. The mount script sanitises labels
-by replacing `/` with `_`, stripping control characters, spaces and leading dots.
 
 ## Journal Logging
 
@@ -154,18 +165,6 @@ with shared propagation, USB sub-mounts appear automatically.
 | `99-auto-mount-sdxy.rules` | udev rules (SCSI/SATA + NVMe) that trigger `usb-mount@.service` |
 | `usb-mount@.service` | systemd template unit (journal-integrated) |
 | `mnt-shared-propagation.service` | Ensures `/mnt` has shared mount propagation for LXC |
-
-## Important Notes
-
-- **NTFS:** `ntfs-3g` is strongly recommended. Without it the kernel driver may mount
-  read-only on dirty volumes. The installer offers to install it. (As I saw on Reddit,
-  it's the best solution, but we're all still waiting for `ntfs-LTE`)
-- **Mount labels:** The mount directory uses the partition label. If none exists, the
-  device name (e.g. `sdc2`) is used. Duplicate labels get a device suffix.
-- **Backups:** `configure_shares.sh` creates timestamped backups of Samba/NFS configs
-  before any modification.
-- **Re-running:** Both the installer and `configure_shares.sh` are idempotent — they use
-  `# BEGIN/END automount-pve` markers and will cleanly replace previous entries.
 
 ## Troubleshooting
 
