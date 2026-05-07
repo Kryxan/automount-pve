@@ -5,7 +5,7 @@ set -euo pipefail
 # installUSBAutoMount.sh
 # installer for Proxmox 9 (Debian Trixie) USB automount system.
 #
-# Repo: https://github.com/Kryxan/automount-pve
+# Repo: https://github.com/theyo-tester/automount-pve
 # Safe to re-run on a broken or partially broken install — removes stale
 # symlinks and files before recreating them, sets correct ownership &
 # permissions, and offers to install required packages.
