@@ -2,7 +2,7 @@
 
 # ---------------------------------------------------------------------------
 # add_rbind_mounts.sh — helper to add recursive /mnt bind mounts to LXC containers
-# Repo: https://github.com/Kryxan/automount-pve
+# Repo: https://github.com/theyo-tester/automount-pve
 # Safe, interactive: scans /etc/pve/lxc/*.conf and offers to add
 #   lxc.mount.entry: /mnt mnt none rbind,create=dir 0 0
 # If an mpX entry already binds /mnt (e.g. mp0: /mnt,mp=/mnt), you can choose
