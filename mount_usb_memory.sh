@@ -6,7 +6,7 @@ set -uo pipefail
 
 # ---------------------------------------------------------------------------
 # mount_usb_memory.sh — automount/unmount handler for USB-attached storage
-# Repo: https://github.com/Kryxan/automount-pve
+# Repo: https://github.com/theyo-tester/automount-pve
 # Called by usb-mount@.service via udev rules
 # Updated for Proxmox 9 (Debian Trixie)
 
