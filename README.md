@@ -29,7 +29,7 @@ Updated for **Proxmox 9** (Debian Trixie). Works on any systemd-based Debian 12+
 ## Quick Start
 
 ```bash
-curl -L https://github.com/Kryxan/automount-pve/archive/refs/heads/main.tar.gz | tar xz -C /tmp/ && /tmp/automount-pve-main/installAutoMount.sh
+curl -L https://github.com/theyo-tester/automount-pve/archive/refs/heads/main.tar.gz | tar xz -C /tmp/ && /tmp/automount-pve-main/installAutoMount.sh
 ```
 
 The installer will:
