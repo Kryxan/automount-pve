@@ -177,7 +177,7 @@ do_mount() {
     else
         # Check if multiple block devices share this label to prevent collisions before mounting
         local duplicate_count
-        duplicate_count=$(${LSBLK_CMD} -rno LABEL 2>/dev/null | grep -Fx "${LABEL}" | wc -l)
+        duplicate_count=$(${LSBLK_CMD} -rno LABEL 2>/dev/null | grep -c -Fx -- "${LABEL}" || true)
         if [[ ${duplicate_count} -gt 1 ]]; then
             local first_dev
             first_dev=$(${LSBLK_CMD} -rno KNAME,LABEL 2>/dev/null | awk -v l="${LABEL}" '$2 == l { print $1; exit }')
