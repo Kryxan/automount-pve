@@ -174,9 +174,27 @@ do_mount() {
 
     if [[ -z "${LABEL}" ]]; then
         LABEL=${DEVBASE}
-    elif /usr/bin/findmnt -n -o TARGET "${MOUNT_PARENT_PATH}/${LABEL}" >/dev/null 2>&1; then
-        # Mount point already in use — make a unique label
-        LABEL+="-${DEVBASE}"
+    else
+        # Check if multiple block devices share this label to prevent collisions before mounting
+        local duplicate_count
+        duplicate_count=$(${LSBLK_CMD} -rno LABEL 2>/dev/null | grep -Fx "${LABEL}" | wc -l)
+        if [[ ${duplicate_count} -gt 1 ]]; then
+            local first_dev
+            first_dev=$(${LSBLK_CMD} -rno KNAME,LABEL 2>/dev/null | awk -v l="${LABEL}" '$2 == l { print $1; exit }')
+            if [[ -n "${first_dev}" && "${first_dev}" != "${DEVBASE}" ]]; then
+                ${LOGGER_CMD} "${ScriptName}: Duplicate volume label '${LABEL}' detected on ${DEVICE} (primary: ${first_dev}); appending -${DEVBASE}"
+                LABEL+="-${DEVBASE}"
+            fi
+        fi
+
+        if /usr/bin/findmnt -n -o TARGET "${MOUNT_PARENT_PATH}/${LABEL}" >/dev/null 2>&1; then
+            local existing_src
+            existing_src=$(/usr/bin/findmnt -n -o SOURCE "${MOUNT_PARENT_PATH}/${LABEL}" 2>/dev/null || true)
+            if [[ -n "${existing_src}" && "${existing_src}" != "${DEVICE}" ]]; then
+                # Mount point already in use by another device — make a unique label
+                LABEL+="-${DEVBASE}"
+            fi
+        fi
     fi
 
     MOUNT_POINT="${MOUNT_PARENT_PATH}/${LABEL}"
@@ -188,9 +206,34 @@ do_mount() {
         exit 1
     fi
 
-    if ! ${MKDIR_CMD} -p "${MOUNT_POINT}"; then
-        ${LOGGER_CMD} "${ScriptName}: Failed to create mount point ${MOUNT_POINT}. Exiting."
-        exit 1
+    # Serialize mount operations to prevent concurrent mount collisions
+    mkdir -p /run/lock
+    exec 200>/run/lock/mount_usb_memory.lock
+    if flock -x -w 30 200; then
+        # Re-verify target mount point after acquiring lock (in case another drive mounted during fsck)
+        if /usr/bin/findmnt -n -o TARGET "${MOUNT_POINT}" >/dev/null 2>&1; then
+            local collision_src
+            collision_src=$(/usr/bin/findmnt -n -o SOURCE "${MOUNT_POINT}" 2>/dev/null || true)
+            if [[ -n "${collision_src}" && "${collision_src}" != "${DEVICE}" ]]; then
+                ${LOGGER_CMD} "${ScriptName}: Target ${MOUNT_POINT} was claimed by ${collision_src} during fsck; moving ${DEVICE} to ${MOUNT_PARENT_PATH}/${LABEL}-${DEVBASE}"
+                LABEL+="-${DEVBASE}"
+                MOUNT_POINT="${MOUNT_PARENT_PATH}/${LABEL}"
+            fi
+        fi
+
+        if ! ${MKDIR_CMD} -p "${MOUNT_POINT}"; then
+            ${LOGGER_CMD} "${ScriptName}: Failed to create mount point ${MOUNT_POINT}. Exiting."
+            exec 200>&-
+            exit 1
+        fi
+        # Explicitly close lock file descriptor so background FUSE daemons (e.g. ntfs-3g) do NOT inherit it
+        exec 200>&-
+    else
+        ${LOGGER_CMD} "${ScriptName}: Timed out waiting for mount lock; proceeding without lock"
+        if ! ${MKDIR_CMD} -p "${MOUNT_POINT}"; then
+            ${LOGGER_CMD} "${ScriptName}: Failed to create mount point ${MOUNT_POINT}. Exiting."
+            exit 1
+        fi
     fi
 
     # --- build mount options per filesystem type ---
