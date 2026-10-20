@@ -161,6 +161,7 @@ do_mount() {
     fi
 
     LABEL=$(${LSBLK_CMD} -no LABEL "${DEVICE}" 2>/dev/null || true)
+    local raw_label="${LABEL}"
 
     # Sanitize the filesystem label to prevent path-traversal and injection:
     #   '/' → '_'           blocks path escape (e.g. "../../etc" on NTFS)
@@ -175,16 +176,28 @@ do_mount() {
     if [[ -z "${LABEL}" ]]; then
         LABEL=${DEVBASE}
     else
-        # Check if multiple block devices share this label to prevent collisions before mounting
-        local duplicate_count
-        duplicate_count=$(${LSBLK_CMD} -rno LABEL 2>/dev/null | grep -c -Fx -- "${LABEL}" || true)
-        if [[ ${duplicate_count} -gt 1 ]]; then
-            local first_dev
-            first_dev=$(${LSBLK_CMD} -rno KNAME,LABEL 2>/dev/null | awk -v l="${LABEL}" '$2 == l { print $1; exit }')
-            if [[ -n "${first_dev}" && "${first_dev}" != "${DEVBASE}" ]]; then
-                ${LOGGER_CMD} "${ScriptName}: Duplicate volume label '${LABEL}' detected on ${DEVICE} (primary: ${first_dev}); appending -${DEVBASE}"
-                LABEL+="-${DEVBASE}"
+        # Compare raw labels, not sanitized labels, so labels with spaces or other
+        # special characters still collide correctly before we generate the mount path.
+        local duplicate_count=0
+        local first_other_dev=""
+        local lsblk_row_pattern='KNAME="([^"]+)"[[:space:]]+LABEL="([^"]*)"'
+        while IFS= read -r entry; do
+            [[ -n "${entry}" ]] || continue
+            if [[ "${entry}" =~ ${lsblk_row_pattern} ]]; then
+                local entry_kname="${BASH_REMATCH[1]}"
+                local entry_label="${BASH_REMATCH[2]}"
+                if [[ "${entry_label}" == "${raw_label}" ]]; then
+                    ((duplicate_count += 1))
+                    if [[ "${entry_kname}" != "${DEVBASE}" && -z "${first_other_dev}" ]]; then
+                        first_other_dev="${entry_kname}"
+                    fi
+                fi
             fi
+        done < <(${LSBLK_CMD} -P -n -o KNAME,LABEL 2>/dev/null)
+
+        if (( duplicate_count > 1 )) && [[ -n "${first_other_dev}" ]]; then
+            ${LOGGER_CMD} "${ScriptName}: Duplicate volume label '${raw_label}' detected on ${DEVICE} (primary: ${first_other_dev}); appending -${DEVBASE}"
+            LABEL+="-${DEVBASE}"
         fi
 
         if /usr/bin/findmnt -n -o TARGET "${MOUNT_PARENT_PATH}/${LABEL}" >/dev/null 2>&1; then
@@ -206,8 +219,10 @@ do_mount() {
         exit 1
     fi
 
-    # Serialize mount operations to prevent concurrent mount collisions
-    mkdir -p /run/lock
+    # Serialize mount operations to prevent concurrent mount collisions.
+    # Keep the lock held until the actual mount completes so competing add actions
+    # cannot race on the same target path; close the fd only after the mount exits.
+    ${MKDIR_CMD} -p /run/lock
     exec 200>/run/lock/mount_usb_memory.lock
     if flock -x -w 30 200; then
         # Re-verify target mount point after acquiring lock (in case another drive mounted during fsck)
@@ -226,67 +241,120 @@ do_mount() {
             exec 200>&-
             exit 1
         fi
-        # Explicitly close lock file descriptor so background FUSE daemons (e.g. ntfs-3g) do NOT inherit it
+
+        # --- build mount options per filesystem type ---
+        OPTS="rw,relatime"
+        USE_NTFS3G=0
+
+        case "${FS_TYPE}" in
+            vfat)
+                OPTS+=",users,gid=100,umask=000,shortname=mixed,utf8=1,flush"
+                ;;
+            ntfs|ntfs3)
+                # Prefer ntfs-3g (FUSE) over the kernel ntfs/ntfs3 driver for
+                # reliability — it handles dirty volumes and is more mature.
+                if command -v ntfs-3g >/dev/null 2>&1; then
+                    USE_NTFS3G=1
+                    OPTS="rw,relatime,big_writes,windows_names,uid=0,gid=0,umask=000"
+                else
+                    ${LOGGER_CMD} "${ScriptName}: WARNING — ntfs-3g not installed; falling back to kernel ntfs3 driver"
+                    OPTS+=",uid=0,gid=0,umask=000"
+                    FS_TYPE="ntfs3"   # ensure we request the kernel driver explicitly
+                fi
+                ;;
+            exfat)
+                OPTS+=",uid=0,gid=0,umask=000"
+                ;;
+            ext2|ext3|ext4)
+                # defaults are fine
+                ;;
+            xfs|btrfs)
+                # defaults are fine
+                ;;
+            *)
+                ${LOGGER_CMD} "${ScriptName}: Filesystem '${FS_TYPE}' — using generic mount options"
+                ;;
+        esac
+
+        # --- perform mount while lock is still held ---
+        local mount_rc=0
+        if [[ ${USE_NTFS3G} -eq 1 ]]; then
+            ${LOGGER_CMD} "${ScriptName}: Mounting ${DEVICE} via ntfs-3g at ${MOUNT_POINT}"
+            if ! ntfs-3g -o "${OPTS}" "${DEVICE}" "${MOUNT_POINT}"; then
+                mount_rc=1
+            fi
+        else
+            if ! ${MOUNT_CMD} -t "${FS_TYPE}" -o "${OPTS}" "${DEVICE}" "${MOUNT_POINT}"; then
+                mount_rc=1
+            fi
+        fi
+
+        if [[ ${mount_rc} -ne 0 ]]; then
+            ${LOGGER_CMD} "${ScriptName}: Error mounting ${DEVICE} (${FS_TYPE}). Cleanup & exit"
+            ${RMDIR_CMD} "${MOUNT_POINT}" 2>/dev/null || true
+            exec 200>&-
+            exit 1
+        fi
+
+        # Explicitly close the lock only after the mount has completed so the lock
+        # covers the actual mount operation while still preventing child daemons from inheriting it.
         exec 200>&-
     else
         ${LOGGER_CMD} "${ScriptName}: Timed out waiting for mount lock; proceeding without lock"
+        exec 200>&-
         if ! ${MKDIR_CMD} -p "${MOUNT_POINT}"; then
             ${LOGGER_CMD} "${ScriptName}: Failed to create mount point ${MOUNT_POINT}. Exiting."
             exit 1
         fi
-    fi
 
-    # --- build mount options per filesystem type ---
-    OPTS="rw,relatime"
-    USE_NTFS3G=0
+        # --- build mount options per filesystem type ---
+        OPTS="rw,relatime"
+        USE_NTFS3G=0
 
-    case "${FS_TYPE}" in
-        vfat)
-            OPTS+=",users,gid=100,umask=000,shortname=mixed,utf8=1,flush"
-            ;;
-        ntfs|ntfs3)
-            # Prefer ntfs-3g (FUSE) over the kernel ntfs/ntfs3 driver for
-            # reliability — it handles dirty volumes and is more mature.
-            if command -v ntfs-3g >/dev/null 2>&1; then
-                USE_NTFS3G=1
-                OPTS="rw,relatime,big_writes,windows_names,uid=0,gid=0,umask=000"
-            else
-                ${LOGGER_CMD} "${ScriptName}: WARNING — ntfs-3g not installed; falling back to kernel ntfs3 driver"
+        case "${FS_TYPE}" in
+            vfat)
+                OPTS+=",users,gid=100,umask=000,shortname=mixed,utf8=1,flush"
+                ;;
+            ntfs|ntfs3)
+                if command -v ntfs-3g >/dev/null 2>&1; then
+                    USE_NTFS3G=1
+                    OPTS="rw,relatime,big_writes,windows_names,uid=0,gid=0,umask=000"
+                else
+                    ${LOGGER_CMD} "${ScriptName}: WARNING — ntfs-3g not installed; falling back to kernel ntfs3 driver"
+                    OPTS+=",uid=0,gid=0,umask=000"
+                    FS_TYPE="ntfs3"
+                fi
+                ;;
+            exfat)
                 OPTS+=",uid=0,gid=0,umask=000"
-                FS_TYPE="ntfs3"   # ensure we request the kernel driver explicitly
+                ;;
+            ext2|ext3|ext4)
+                ;;
+            xfs|btrfs)
+                ;;
+            *)
+                ${LOGGER_CMD} "${ScriptName}: Filesystem '${FS_TYPE}' — using generic mount options"
+                ;;
+        esac
+
+        # --- perform mount without lock ---
+        local mount_rc=0
+        if [[ ${USE_NTFS3G} -eq 1 ]]; then
+            ${LOGGER_CMD} "${ScriptName}: Mounting ${DEVICE} via ntfs-3g at ${MOUNT_POINT}"
+            if ! ntfs-3g -o "${OPTS}" "${DEVICE}" "${MOUNT_POINT}"; then
+                mount_rc=1
             fi
-            ;;
-        exfat)
-            OPTS+=",uid=0,gid=0,umask=000"
-            ;;
-        ext2|ext3|ext4)
-            # defaults are fine
-            ;;
-        xfs|btrfs)
-            # defaults are fine
-            ;;
-        *)
-            ${LOGGER_CMD} "${ScriptName}: Filesystem '${FS_TYPE}' — using generic mount options"
-            ;;
-    esac
-
-    # --- perform mount ---
-    local mount_rc=0
-    if [[ ${USE_NTFS3G} -eq 1 ]]; then
-        ${LOGGER_CMD} "${ScriptName}: Mounting ${DEVICE} via ntfs-3g at ${MOUNT_POINT}"
-        if ! ntfs-3g -o "${OPTS}" "${DEVICE}" "${MOUNT_POINT}"; then
-            mount_rc=1
+        else
+            if ! ${MOUNT_CMD} -t "${FS_TYPE}" -o "${OPTS}" "${DEVICE}" "${MOUNT_POINT}"; then
+                mount_rc=1
+            fi
         fi
-    else
-        if ! ${MOUNT_CMD} -t "${FS_TYPE}" -o "${OPTS}" "${DEVICE}" "${MOUNT_POINT}"; then
-            mount_rc=1
-        fi
-    fi
 
-    if [[ ${mount_rc} -ne 0 ]]; then
-        ${LOGGER_CMD} "${ScriptName}: Error mounting ${DEVICE} (${FS_TYPE}). Cleanup & exit"
-        ${RMDIR_CMD} "${MOUNT_POINT}" 2>/dev/null || true
-        exit 1
+        if [[ ${mount_rc} -ne 0 ]]; then
+            ${LOGGER_CMD} "${ScriptName}: Error mounting ${DEVICE} (${FS_TYPE}). Cleanup & exit"
+            ${RMDIR_CMD} "${MOUNT_POINT}" 2>/dev/null || true
+            exit 1
+        fi
     fi
 
     # Ensure mount propagation is shared recursively to ${MOUNT_PARENT_PATH}.
